@@ -1,5 +1,4 @@
 flask
 python-socketio
-gevent
-gevent-websocket
+eventlet
 gunicorn
