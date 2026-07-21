@@ -1,5 +1,6 @@
-import socketio
+import os
 import eventlet
+import socketio
 
 sio = socketio.Server(cors_allowed_origins='*')
 app = socketio.WSGIApp(sio)
@@ -44,5 +45,8 @@ def disconnect(sid):
 
 
 if __name__ == '__main__':
-    print("[SERVEUR] Serveur de messagerie démarré sur le port 5000...")
-    eventlet.wsgi.server(eventlet.listen(('0.0.0.0', 5000)), app)
+    # Récupération du port dynamiquement attribué par Render (5000 par défaut en local)
+    port = int(os.environ.get("PORT", 5000))
+    print(f"[SERVEUR] Serveur de messagerie démarré sur le port {port}...")
+    
+    eventlet.wsgi.server(eventlet.listen(('0.0.0.0', port)), app)
