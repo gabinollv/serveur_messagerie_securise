@@ -19,38 +19,38 @@ def connect(sid, environ):
 
 @sio.event
 def enregistrer_utilisateur(sid, data):
-    # data contient : {'pseudo': 'Alice', 'code': '1234'}
     pseudo = data.get('pseudo')
     code = data.get('code')
 
     if not pseudo or not code:
-        return {'succes': False, 'message': "Pseudo et code obligatoires."}
+        sio.emit('reponse_connexion', {'succes': False, 'message': "Pseudo et code obligatoires."}, room=sid)
+        return
 
     # CAS 1 : Premier utilisateur -> Création du compte
     if pseudo not in comptes:
         comptes[pseudo] = code
         utilisateurs[pseudo] = sid
         print(f"[INSCRIPTION] Nouveau compte créé pour '{pseudo}'.")
+        sio.emit('reponse_connexion', {'succes': True, 'message': f"Bienvenue ! Compte créé pour '{pseudo}'."}, room=sid)
         sio.emit('liste_contacts', list(utilisateurs.keys()))
-        return {'succes': True, 'message': f"Bienvenue ! Compte créé pour '{pseudo}'."}
 
     # CAS 2 : Utilisateur existant -> Authentification
     else:
-        # Vérification si le pseudo n'est pas DÉJÀ connecté
         if pseudo in utilisateurs:
-            return {'succes': False, 'message': "Ce pseudo est déjà connecté actuellement."}
+            sio.emit('reponse_connexion', {'succes': False, 'message': "Ce pseudo est déjà connecté actuellement."}, room=sid)
+            return
 
-        # Vérification du mot de passe / code
         if comptes[pseudo] == code:
             utilisateurs[pseudo] = sid
             print(f"[CONNEXION] Authentification réussie pour '{pseudo}'.")
+            sio.emit('reponse_connexion', {'succes': True, 'message': f"Bon retour parmi nous, '{pseudo}' !"}, room=sid)
             sio.emit('liste_contacts', list(utilisateurs.keys()))
-            return {'succes': True, 'message': f"Bon retour parmi nous, '{pseudo}' !"}
         else:
             print(f"[ÉCHEC] Mauvais code pour '{pseudo}'.")
-            return {
-                'succes': False,
+            sio.emit('reponse_connexion', {
+                'succes': False, 
                 'message': "Ce pseudo est déjà réservé ! Mauvais code ou choisissez un autre pseudo."
+            }, room=sid)
             }
 
 
