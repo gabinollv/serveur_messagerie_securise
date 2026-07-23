@@ -5,7 +5,10 @@ import socketio
 sio = socketio.Server(cors_allowed_origins='*')
 app = socketio.WSGIApp(sio)
 
-# Dictionnaire { pseudo: socket_id }
+# Dictionnaire des comptes inscrits : { pseudo: mot_de_passe }
+comptes = {}
+
+# Dictionnaire des sessions actives : { pseudo: socket_id }
 utilisateurs = {}
 
 
@@ -15,11 +18,40 @@ def connect(sid, environ):
 
 
 @sio.event
-def enregistrer_utilisateur(sid, pseudo):
-    utilisateurs[pseudo] = sid
-    print(f"[ENREGISTREMENT] {pseudo} est connecté.")
-    # Diffuser la liste mise à jour des contacts à tout le monde
-    sio.emit('liste_contacts', list(utilisateurs.keys()))
+def enregistrer_utilisateur(sid, data):
+    # data contient : {'pseudo': 'Alice', 'code': '1234'}
+    pseudo = data.get('pseudo')
+    code = data.get('code')
+
+    if not pseudo or not code:
+        return {'succes': False, 'message': "Pseudo et code obligatoires."}
+
+    # CAS 1 : Premier utilisateur -> Création du compte
+    if pseudo not in comptes:
+        comptes[pseudo] = code
+        utilisateurs[pseudo] = sid
+        print(f"[INSCRIPTION] Nouveau compte créé pour '{pseudo}'.")
+        sio.emit('liste_contacts', list(utilisateurs.keys()))
+        return {'succes': True, 'message': f"Bienvenue ! Compte créé pour '{pseudo}'."}
+
+    # CAS 2 : Utilisateur existant -> Authentification
+    else:
+        # Vérification si le pseudo n'est pas DÉJÀ connecté
+        if pseudo in utilisateurs:
+            return {'succes': False, 'message': "Ce pseudo est déjà connecté actuellement."}
+
+        # Vérification du mot de passe / code
+        if comptes[pseudo] == code:
+            utilisateurs[pseudo] = sid
+            print(f"[CONNEXION] Authentification réussie pour '{pseudo}'.")
+            sio.emit('liste_contacts', list(utilisateurs.keys()))
+            return {'succes': True, 'message': f"Bon retour parmi nous, '{pseudo}' !"}
+        else:
+            print(f"[ÉCHEC] Mauvais code pour '{pseudo}'.")
+            return {
+                'succes': False,
+                'message': "Ce pseudo est déjà réservé ! Mauvais code ou choisissez un autre pseudo."
+            }
 
 
 @sio.event
@@ -45,8 +77,6 @@ def disconnect(sid):
 
 
 if __name__ == '__main__':
-    # Récupération du port dynamiquement attribué par Render (5000 par défaut en local)
     port = int(os.environ.get("PORT", 5000))
     print(f"[SERVEUR] Serveur de messagerie démarré sur le port {port}...")
-    
     eventlet.wsgi.server(eventlet.listen(('0.0.0.0', port)), app)
