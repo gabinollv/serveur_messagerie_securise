@@ -2,10 +2,13 @@ import os
 import eventlet
 import socketio
 
-sio = socketio.Server(cors_allowed_origins='*')
+# Patch eventlet pour gérer les entrées/sorties de manière asynchrone
+eventlet.monkey_patch()
+
+sio = socketio.Server(cors_allowed_origins='*', async_mode='eventlet')
 app = socketio.WSGIApp(sio)
 
-# Dictionnaire des comptes inscrits : { pseudo: mot_de_passe }
+# Dictionnaire des comptes inscrits : { pseudo: code }
 comptes = {}
 
 # Dictionnaire des sessions actives : { pseudo: socket_id }
@@ -49,21 +52,19 @@ def enregistrer_utilisateur(sid, data):
             print(f"[ÉCHEC] Mauvais code pour '{pseudo}'.")
             sio.emit('reponse_connexion', {
                 'succes': False, 
-                'message': "Ce pseudo est déjà réservé ! Mauvais code ou choisissez un autre pseudo."
+                'message': "Ce pseudo est déjà réservé ! Mauvais code."
             }, room=sid)
-            }
 
 
 @sio.event
 def envoyer_message_direct(sid, data):
-    # data contient: {'destinataire': 'Bob', 'type': 'HANDSHAKE_INIT|HANDSHAKE_RESP|MSG', 'contenu': '...'}
     destinataire = data.get('destinataire')
     expediteur = data.get('expediteur')
 
     if destinataire in utilisateurs:
         target_sid = utilisateurs[destinataire]
         sio.emit('reception_message', data, room=target_sid)
-        print(f"[RELAIS] Message ({data['type']}) de {expediteur} vers {destinataire}")
+        print(f"[RELAIS] Message ({data.get('type')}) de {expediteur} vers {destinataire}")
 
 
 @sio.event
