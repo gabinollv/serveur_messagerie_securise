@@ -1,15 +1,40 @@
+import json
 import os
 import eventlet
 import socketio
 
-# Patch eventlet pour gérer les entrées/sorties de manière asynchrone
+# Patch eventlet pour la gestion asynchrone
 eventlet.monkey_patch()
 
 sio = socketio.Server(cors_allowed_origins='*', async_mode='eventlet')
 app = socketio.WSGIApp(sio)
 
-# Dictionnaire des comptes inscrits : { pseudo: code }
-comptes = {}
+# Nom du fichier où seront sauvegardés les comptes
+FICHIER_COMPTES = "comptes.json"
+
+# --- GESTION DE LA SAUVEGARDE DES COMPTES ---
+def charger_comptes():
+    """Charge les comptes depuis le fichier JSON s'il existe."""
+    if os.path.exists(FICHIER_COMPTES):
+        try:
+            with open(FICHIER_COMPTES, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"[ERREUR] Impossible de lire {FICHIER_COMPTES}: {e}")
+            return {}
+    return {}
+
+def sauvegarder_comptes():
+    """Sauvegarde le dictionnaire des comptes dans le fichier JSON."""
+    try:
+        with open(FICHIER_COMPTES, "w", encoding="utf-8") as f:
+            json.dump(comptes, f, indent=4)
+    except Exception as e:
+        print(f"[ERREUR] Impossible de sauvegarder dans {FICHIER_COMPTES}: {e}")
+
+# Chargement des comptes existants au démarrage du serveur
+comptes = charger_comptes()
+print(f"[SERVEUR] {len(comptes)} compte(s) chargé(s) depuis la base de données locale.")
 
 # Dictionnaire des sessions actives : { pseudo: socket_id }
 utilisateurs = {}
@@ -32,17 +57,19 @@ def enregistrer_utilisateur(sid, data):
     # CAS 1 : Pseudo jamais utilisé -> CRÉATION DU COMPTE UNIQUE
     if pseudo not in comptes:
         comptes[pseudo] = code
+        sauvegarder_comptes()  # 💾 Sauvegarde automatique du nouveau compte dans le fichier JSON !
+        
         utilisateurs[pseudo] = sid
-        print(f"[INSCRIPTION] Compte créé pour '{pseudo}'.")
+        print(f"[INSCRIPTION] Nouveau compte créé et sauvegardé pour '{pseudo}'.")
         sio.emit('reponse_connexion', {
             'succes': True, 
             'message': f"Bienvenue ! Compte créé avec succès pour '{pseudo}'."
         }, room=sid)
         sio.emit('liste_contacts', list(utilisateurs.keys()))
 
-    # CAS 2 : Pseudo DÉJÀ EXIETANT -> AUTHENTIFICATION
+    # CAS 2 : Pseudo DÉJÀ EXISTANT -> AUTHENTIFICATION
     else:
-        # Vérification 1 : Est-ce que le pseudo est déjà en cours d'utilisation ?
+        # Vérification 1 : Est-ce que le pseudo est déjà en ligne ?
         if pseudo in utilisateurs:
             sio.emit('reponse_connexion', {
                 'succes': False, 
@@ -61,10 +88,10 @@ def enregistrer_utilisateur(sid, data):
             sio.emit('liste_contacts', list(utilisateurs.keys()))
         else:
             # Le pseudo existe déjà ET le code est faux -> Tentative d'usurpation
-            print(f"[ÉCHEC] Tentative de connexion avec un mauvais code sur '{pseudo}'.")
+            print(f"[ÉCHEC] Mauvais code pour le compte existant '{pseudo}'.")
             sio.emit('reponse_connexion', {
                 'succes': False, 
-                'message': "Ce pseudo appartient déjà à un autre utilisateur ! Choisis un autre pseudo."
+                'message': "Ce pseudo appartient déjà à un autre utilisateur ! Mauvais code ou choisis un autre pseudo."
             }, room=sid)
 
 
