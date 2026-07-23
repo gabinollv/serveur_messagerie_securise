@@ -29,30 +29,42 @@ def enregistrer_utilisateur(sid, data):
         sio.emit('reponse_connexion', {'succes': False, 'message': "Pseudo et code obligatoires."}, room=sid)
         return
 
-    # CAS 1 : Premier utilisateur -> Création du compte
+    # CAS 1 : Pseudo jamais utilisé -> CRÉATION DU COMPTE UNIQUE
     if pseudo not in comptes:
         comptes[pseudo] = code
         utilisateurs[pseudo] = sid
-        print(f"[INSCRIPTION] Nouveau compte créé pour '{pseudo}'.")
-        sio.emit('reponse_connexion', {'succes': True, 'message': f"Bienvenue ! Compte créé pour '{pseudo}'."}, room=sid)
+        print(f"[INSCRIPTION] Compte créé pour '{pseudo}'.")
+        sio.emit('reponse_connexion', {
+            'succes': True, 
+            'message': f"Bienvenue ! Compte créé avec succès pour '{pseudo}'."
+        }, room=sid)
         sio.emit('liste_contacts', list(utilisateurs.keys()))
 
-    # CAS 2 : Utilisateur existant -> Authentification
+    # CAS 2 : Pseudo DÉJÀ EXIETANT -> AUTHENTIFICATION
     else:
+        # Vérification 1 : Est-ce que le pseudo est déjà en cours d'utilisation ?
         if pseudo in utilisateurs:
-            sio.emit('reponse_connexion', {'succes': False, 'message': "Ce pseudo est déjà connecté actuellement."}, room=sid)
+            sio.emit('reponse_connexion', {
+                'succes': False, 
+                'message': "Ce pseudo est déjà en ligne sur un autre appareil."
+            }, room=sid)
             return
 
+        # Vérification 2 : Est-ce que le code correspond au compte d'origine ?
         if comptes[pseudo] == code:
             utilisateurs[pseudo] = sid
             print(f"[CONNEXION] Authentification réussie pour '{pseudo}'.")
-            sio.emit('reponse_connexion', {'succes': True, 'message': f"Bon retour parmi nous, '{pseudo}' !"}, room=sid)
+            sio.emit('reponse_connexion', {
+                'succes': True, 
+                'message': f"Bon retour parmi nous, '{pseudo}' !"
+            }, room=sid)
             sio.emit('liste_contacts', list(utilisateurs.keys()))
         else:
-            print(f"[ÉCHEC] Mauvais code pour '{pseudo}'.")
+            # Le pseudo existe déjà ET le code est faux -> Tentative d'usurpation
+            print(f"[ÉCHEC] Tentative de connexion avec un mauvais code sur '{pseudo}'.")
             sio.emit('reponse_connexion', {
                 'succes': False, 
-                'message': "Ce pseudo est déjà réservé ! Mauvais code."
+                'message': "Ce pseudo appartient déjà à un autre utilisateur ! Choisis un autre pseudo."
             }, room=sid)
 
 
