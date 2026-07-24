@@ -11,16 +11,13 @@ sio = socketio.Server(cors_allowed_origins='*', async_mode='eventlet')
 app = socketio.WSGIApp(sio)
 
 FICHIER_COMPTES = "comptes.json"
-
-# --- PROTECTION ANTI BRUTE-FORCE ---
 tentatives_echouees = {}
 
 def verifier_rate_limit(ip):
     maintenant = time.time()
     info = tentatives_echouees.get(ip, {'compteur': 0, 'bloque_jusqu_a': 0})
     if maintenant < info['bloque_jusqu_a']:
-        temps_restant = int(info['bloque_jusqu_a'] - maintenant)
-        return False, f"Trop d'échecs. Réessayez dans {temps_restant}s."
+        return False, f"Trop d'échecs. Réessayez dans {int(info['bloque_jusqu_a'] - maintenant)}s."
     return True, ""
 
 def enregistrer_echec(ip):
@@ -30,14 +27,12 @@ def enregistrer_echec(ip):
     if info['compteur'] >= 5:
         info['bloque_jusqu_a'] = maintenant + 30
         info['compteur'] = 0
-        print(f"[SECURITE] IP {ip} bloquée 30s.")
     tentatives_echouees[ip] = info
 
 def reinitialiser_echecs(ip):
     if ip in tentatives_echouees:
         del tentatives_echouees[ip]
 
-# --- GESTION DES COMPTES ---
 def charger_comptes():
     if os.path.exists(FICHIER_COMPTES):
         try:
@@ -55,14 +50,11 @@ def sauvegarder_comptes():
         print(f"[ERREUR] Sauvegarde: {e}")
 
 comptes = charger_comptes()
-utilisateurs = {}  # { pseudo: sid }
-
+utilisateurs = {}
 
 @sio.event
 def connect(sid, environ):
-    ip = environ.get('REMOTE_ADDR', sid)
-    print(f"[CONNEXION] IP: {ip} | SID: {sid}")
-
+    pass
 
 @sio.event
 def enregistrer_utilisateur(sid, data):
@@ -87,7 +79,6 @@ def enregistrer_utilisateur(sid, data):
         sauvegarder_comptes()
         utilisateurs[pseudo] = sid
         reinitialiser_echecs(ip)
-        print(f"[INSCRIPTION] Compte créé : '{pseudo}'.")
         sio.emit('reponse_connexion', {'succes': True, 'message': f"Compte créé pour '{pseudo}'."}, room=sid)
         sio.emit('liste_contacts', list(utilisateurs.keys()))
     else:
@@ -98,21 +89,19 @@ def enregistrer_utilisateur(sid, data):
         if bcrypt.checkpw(code.encode('utf-8'), comptes[pseudo].encode('utf-8')):
             utilisateurs[pseudo] = sid
             reinitialiser_echecs(ip)
-            print(f"[CONNEXION] Authentifié : '{pseudo}'.")
             sio.emit('reponse_connexion', {'succes': True, 'message': f"Bon retour, '{pseudo}' !"}, room=sid)
             sio.emit('liste_contacts', list(utilisateurs.keys()))
         else:
             enregistrer_echec(ip)
             sio.emit('reponse_connexion', {'succes': False, 'message': "Code incorrect !"}, room=sid)
 
-
 @sio.event
 def envoyer_message_direct(sid, data):
     destinataire = data.get('destinataire')
+    # Les messages factices (PADDING) sont ignorés par le destinataire mais brouillent l'analyse réseau
     if destinataire in utilisateurs:
         target_sid = utilisateurs[destinataire]
         sio.emit('reception_message', data, room=target_sid)
-
 
 @sio.event
 def disconnect(sid):
@@ -122,8 +111,7 @@ def disconnect(sid):
             sio.emit('liste_contacts', list(utilisateurs.keys()))
             break
 
-
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
-    print(f"[SERVEUR SÉCURISÉ] Démarré sur le port {port}...")
+    print(f"[SERVEUR ULTIMATE] Démarré sur le port {port}...")
     eventlet.wsgi.server(eventlet.listen(('0.0.0.0', port)), app)
