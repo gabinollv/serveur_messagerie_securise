@@ -2,6 +2,7 @@ import json
 import os
 import eventlet
 import socketio
+import bcrypt
 
 # Patch eventlet pour la gestion asynchrone
 eventlet.monkey_patch()
@@ -9,12 +10,9 @@ eventlet.monkey_patch()
 sio = socketio.Server(cors_allowed_origins='*', async_mode='eventlet')
 app = socketio.WSGIApp(sio)
 
-# Nom du fichier où seront sauvegardés les comptes
 FICHIER_COMPTES = "comptes.json"
 
-# --- GESTION DE LA SAUVEGARDE DES COMPTES ---
 def charger_comptes():
-    """Charge les comptes depuis le fichier JSON s'il existe."""
     if os.path.exists(FICHIER_COMPTES):
         try:
             with open(FICHIER_COMPTES, "r", encoding="utf-8") as f:
@@ -25,25 +23,20 @@ def charger_comptes():
     return {}
 
 def sauvegarder_comptes():
-    """Sauvegarde le dictionnaire des comptes dans le fichier JSON."""
     try:
         with open(FICHIER_COMPTES, "w", encoding="utf-8") as f:
             json.dump(comptes, f, indent=4)
     except Exception as e:
         print(f"[ERREUR] Impossible de sauvegarder dans {FICHIER_COMPTES}: {e}")
 
-# Chargement des comptes existants au démarrage du serveur
 comptes = charger_comptes()
 print(f"[SERVEUR] {len(comptes)} compte(s) chargé(s) depuis la base de données locale.")
 
-# Dictionnaire des sessions actives : { pseudo: socket_id }
 utilisateurs = {}
-
 
 @sio.event
 def connect(sid, environ):
     print(f"[CONNEXION] Client connecté : {sid}")
-
 
 @sio.event
 def enregistrer_utilisateur(sid, data):
@@ -54,22 +47,26 @@ def enregistrer_utilisateur(sid, data):
         sio.emit('reponse_connexion', {'succes': False, 'message': "Pseudo et code obligatoires."}, room=sid)
         return
 
-    # CAS 1 : Pseudo jamais utilisé -> CRÉATION DU COMPTE UNIQUE
+    # CAS 1 : Inscription -> On HACHE le code avant de le stocker !
     if pseudo not in comptes:
-        comptes[pseudo] = code
-        sauvegarder_comptes()  # 💾 Sauvegarde automatique du nouveau compte dans le fichier JSON !
+        # Génération du sel + hachage
+        code_bytes = code.encode('utf-8')
+        sel = bcrypt.gensalt()
+        code_hache = bcrypt.hashpw(code_bytes, sel).decode('utf-8')
+
+        comptes[pseudo] = code_hache
+        sauvegarder_comptes()
         
         utilisateurs[pseudo] = sid
-        print(f"[INSCRIPTION] Nouveau compte créé et sauvegardé pour '{pseudo}'.")
+        print(f"[INSCRIPTION SÉCURISÉE] Compte créé et code haché pour '{pseudo}'.")
         sio.emit('reponse_connexion', {
             'succes': True, 
             'message': f"Bienvenue ! Compte créé avec succès pour '{pseudo}'."
         }, room=sid)
         sio.emit('liste_contacts', list(utilisateurs.keys()))
 
-    # CAS 2 : Pseudo DÉJÀ EXISTANT -> AUTHENTIFICATION
+    # CAS 2 : Connexion -> On vérifie le hachage
     else:
-        # Vérification 1 : Est-ce que le pseudo est déjà en ligne ?
         if pseudo in utilisateurs:
             sio.emit('reponse_connexion', {
                 'succes': False, 
@@ -77,8 +74,11 @@ def enregistrer_utilisateur(sid, data):
             }, room=sid)
             return
 
-        # Vérification 2 : Est-ce que le code correspond au compte d'origine ?
-        if comptes[pseudo] == code:
+        # Vérification sécurisée du mot de passe haché
+        code_bytes = code.encode('utf-8')
+        code_hache_enregistre = comptes[pseudo].encode('utf-8')
+
+        if bcrypt.checkpw(code_bytes, code_hache_enregistre):
             utilisateurs[pseudo] = sid
             print(f"[CONNEXION] Authentification réussie pour '{pseudo}'.")
             sio.emit('reponse_connexion', {
@@ -87,13 +87,11 @@ def enregistrer_utilisateur(sid, data):
             }, room=sid)
             sio.emit('liste_contacts', list(utilisateurs.keys()))
         else:
-            # Le pseudo existe déjà ET le code est faux -> Tentative d'usurpation
-            print(f"[ÉCHEC] Mauvais code pour le compte existant '{pseudo}'.")
+            print(f"[ÉCHEC] Mauvais code pour '{pseudo}'.")
             sio.emit('reponse_connexion', {
                 'succes': False, 
-                'message': "Ce pseudo appartient déjà à un autre utilisateur ! Mauvais code ou choisis un autre pseudo."
+                'message': "Ce pseudo appartient déjà à un autre utilisateur ! Mauvais code."
             }, room=sid)
-
 
 @sio.event
 def envoyer_message_direct(sid, data):
@@ -103,8 +101,7 @@ def envoyer_message_direct(sid, data):
     if destinataire in utilisateurs:
         target_sid = utilisateurs[destinataire]
         sio.emit('reception_message', data, room=target_sid)
-        print(f"[RELAIS] Message ({data.get('type')}) de {expediteur} vers {destinataire}")
-
+        print(f"[RELAIS] Message de {expediteur} vers {destinataire}")
 
 @sio.event
 def disconnect(sid):
@@ -115,8 +112,7 @@ def disconnect(sid):
             sio.emit('liste_contacts', list(utilisateurs.keys()))
             break
 
-
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
-    print(f"[SERVEUR] Serveur de messagerie démarré sur le port {port}...")
+    print(f"[SERVEUR] Serveur démarré sur le port {port}...")
     eventlet.wsgi.server(eventlet.listen(('0.0.0.0', port)), app)
