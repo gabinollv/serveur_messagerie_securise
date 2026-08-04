@@ -23,8 +23,8 @@ FICHIER_COMPTES = "comptes.json"
 tentatives_echouees = {}
 
 # Mappage strict pour prévenir l'usurpation d'identité (Spoofing)
-utilisateurs = {}       # { pseudo: sid }
-sid_vers_pseudo = {}    # { sid: pseudo }
+utilisateurs = {}     # { pseudo: sid }
+sid_vers_pseudo = {}  # { sid: pseudo }
 
 def nettoyer_rate_limit():
     """Purge dynamique des données de rate-limiting pour éviter la fuite mémoire (DoS)."""
@@ -81,6 +81,12 @@ def sauvegarder_comptes_atomique():
 
 comptes = charger_comptes()
 
+def diffuser_liste_contacts():
+    """Diffuse la liste de tous les inscrits (ou connectés) à tout le monde."""
+    # On renvoie l'ensemble des comptes inscrits
+    liste_membres = list(comptes.keys())
+    sio.emit('liste_contacts', liste_membres)
+
 @sio.event
 def connect(sid, environ):
     pass
@@ -91,7 +97,7 @@ def enregistrer_utilisateur(sid, data):
         return
 
     environ = sio.get_environ(sid)
-    # Isolation stricte de l'adresse IP distante (ignorer les headers falsifiables)
+    # Isolation stricte de l'adresse IP distante
     ip = environ.get('REMOTE_ADDR', sid) if environ else sid
 
     autorise, msg_erreur = verifier_rate_limit(ip)
@@ -107,7 +113,7 @@ def enregistrer_utilisateur(sid, data):
         return
 
     if pseudo not in comptes:
-        # Hachage fort Bcrypt avec un coût élevé (Work Factor 12)
+        # Hachage fort Bcrypt (Work Factor 12)
         sel = bcrypt.gensalt(rounds=12)
         comptes[pseudo] = bcrypt.hashpw(code.encode('utf-8'), sel).decode('utf-8')
         sauvegarder_comptes_atomique()
@@ -117,7 +123,7 @@ def enregistrer_utilisateur(sid, data):
         reinitialiser_echecs(ip)
         
         sio.emit('reponse_connexion', {'succes': True, 'message': f"Compte sécurisé créé pour '{pseudo}'."}, room=sid)
-        sio.emit('liste_contacts', list(utilisateurs.keys()))
+        diffuser_liste_contacts()
     else:
         if pseudo in utilisateurs:
             sio.emit('reponse_connexion', {'succes': False, 'message': "Session déjà active pour cet utilisateur."}, room=sid)
@@ -129,17 +135,59 @@ def enregistrer_utilisateur(sid, data):
             reinitialiser_echecs(ip)
             
             sio.emit('reponse_connexion', {'succes': True, 'message': f"Authentifié en tant que '{pseudo}'."}, room=sid)
-            sio.emit('liste_contacts', list(utilisateurs.keys()))
+            diffuser_liste_contacts()
         else:
             enregistrer_echec(ip)
             sio.emit('reponse_connexion', {'succes': False, 'message': "Identifiants invalides !"}, room=sid)
+
+@sio.event
+def obtenir_liste_contacts(sid, data=None):
+    """Permet au client de redemander la liste des membres à tout moment."""
+    sio.emit('liste_contacts', list(comptes.keys()), room=sid)
+
+@sio.event
+def envoyer_demande_ami(sid, data):
+    """Relaye une demande d'ami vers le destinataire ciblé."""
+    if not isinstance(data, dict):
+        return
+    
+    demandeur = sid_vers_pseudo.get(sid)
+    if not demandeur:
+        return
+
+    destinataire = str(data.get('destinataire', '')).strip()
+    
+    # Si le destinataire est connecté, on lui transmet la demande en direct
+    if destinataire in utilisateurs:
+        target_sid = utilisateurs[destinataire]
+        sio.emit('demande_ami_recue', {'demandeur': demandeur}, room=target_sid)
+
+@sio.event
+def reponse_demande_ami(sid, data):
+    """Relaye la réponse (acceptée/refusée) à l'initiateur de la demande."""
+    if not isinstance(data, dict):
+        return
+
+    repondeur = sid_vers_pseudo.get(sid)
+    if not repondeur:
+        return
+
+    demandeur = str(data.get('demandeur', '')).strip()
+    accepte = bool(data.get('accepte', False))
+
+    if demandeur in utilisateurs:
+        target_sid = utilisateurs[demandeur]
+        sio.emit('reponse_demande_ami_recue', {
+            'contact': repondeur,
+            'accepte': accepte
+        }, room=target_sid)
 
 @sio.event
 def envoyer_message_direct(sid, data):
     if not isinstance(data, dict):
         return
     
-    # Validation du SID et élimination totale de l'usurpation d'identité
+    # Validation du SID et élimination de l'usurpation d'identité
     expediteur_reel = sid_vers_pseudo.get(sid)
     if not expediteur_reel:
         return
@@ -164,7 +212,7 @@ def disconnect(sid):
         pseudo = sid_vers_pseudo.pop(sid)
         if pseudo in utilisateurs:
             del utilisateurs[pseudo]
-        sio.emit('liste_contacts', list(utilisateurs.keys()))
+        diffuser_liste_contacts()
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
