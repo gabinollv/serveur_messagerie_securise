@@ -122,9 +122,9 @@ def enregistrer_utilisateur(sid, data):
         sio.emit('reponse_connexion', {'succes': True, 'message': f"Compte sécurisé créé pour '{pseudo}'."}, room=sid)
         diffuser_liste_contacts()
     else:
-        # SI LE MÊME PSEUDO ÉTAIT DÉJÀ CONNECTÉ (ex: reconnexion automatique/changement de SID), ON MET À JOUR LE SID
+        # Authentification d'un compte existant / Reconnexion
         if bcrypt.checkpw(code.encode('utf-8'), comptes[pseudo].encode('utf-8')):
-            # Nettoyage de l'ancien SID s'il existait
+            # Nettoyage de la liaison de l'ancien SID si l'utilisateur change de socket
             ancien_sid = utilisateurs.get(pseudo)
             if ancien_sid and ancien_sid in sid_vers_pseudo:
                 del sid_vers_pseudo[ancien_sid]
@@ -207,7 +207,7 @@ def envoyer_message_direct(sid, data):
             'signature': str(data.get('signature', ''))
         }
         
-        # Envoi au destinataire
+        # Envoi direct au SID actif du destinataire
         sio.emit('reception_message', payload_securise, room=target_sid)
         print(f"[SUCCÈS TRANSFERT] Message transmis à {destinataire} (SID: {target_sid})")
     else:
@@ -219,10 +219,15 @@ def envoyer_message_direct(sid, data):
 def disconnect(sid):
     if sid in sid_vers_pseudo:
         pseudo = sid_vers_pseudo.pop(sid)
-        if pseudo in utilisateurs:
+        
+        # CORRECTIF : On ne supprime l'utilisateur de 'utilisateurs' QUE SI
+        # le SID déconnecté est bien le SID actif (évite d'effacer une reconnexion récente)
+        if utilisateurs.get(pseudo) == sid:
             del utilisateurs[pseudo]
-        print(f"[DÉCONNEXION] {pseudo} s'est déconnecté (SID: {sid})")
-        diffuser_liste_contacts()
+            print(f"[DÉCONNEXION] {pseudo} s'est totalement déconnecté (SID: {sid})")
+            diffuser_liste_contacts()
+        else:
+            print(f"[RECONNEXION DUPLIQUÉE] Ancien SID nettoyé ({sid}) pour {pseudo}, la nouvelle session active est préservée.")
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
