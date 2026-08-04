@@ -49,7 +49,6 @@ def enregistrer_echec(ip):
     info = tentatives_echouees.get(ip, {'compteur': 0, 'bloque_jusqu_a': 0})
     info['compteur'] += 1
     if info['compteur'] >= 5:
-        # Blocage progressif : 60 secondes
         info['bloque_jusqu_a'] = maintenant + 60
         info['compteur'] = 0
     tentatives_echouees[ip] = info
@@ -83,13 +82,12 @@ comptes = charger_comptes()
 
 def diffuser_liste_contacts():
     """Diffuse la liste de tous les inscrits (ou connectés) à tout le monde."""
-    # On renvoie l'ensemble des comptes inscrits
     liste_membres = list(comptes.keys())
     sio.emit('liste_contacts', liste_membres)
 
 @sio.event
 def connect(sid, environ):
-    pass
+    print(f"[CONNECT] Nouvelle connexion socket établie : SID={sid}")
 
 @sio.event
 def enregistrer_utilisateur(sid, data):
@@ -97,7 +95,6 @@ def enregistrer_utilisateur(sid, data):
         return
 
     environ = sio.get_environ(sid)
-    # Isolation stricte de l'adresse IP distante
     ip = environ.get('REMOTE_ADDR', sid) if environ else sid
 
     autorise, msg_erreur = verifier_rate_limit(ip)
@@ -113,7 +110,6 @@ def enregistrer_utilisateur(sid, data):
         return
 
     if pseudo not in comptes:
-        # Hachage fort Bcrypt (Work Factor 12)
         sel = bcrypt.gensalt(rounds=12)
         comptes[pseudo] = bcrypt.hashpw(code.encode('utf-8'), sel).decode('utf-8')
         sauvegarder_comptes_atomique()
@@ -122,32 +118,35 @@ def enregistrer_utilisateur(sid, data):
         sid_vers_pseudo[sid] = pseudo
         reinitialiser_echecs(ip)
         
+        print(f"[INSCRIPTION] Nouvel utilisateur : {pseudo} (SID: {sid})")
         sio.emit('reponse_connexion', {'succes': True, 'message': f"Compte sécurisé créé pour '{pseudo}'."}, room=sid)
         diffuser_liste_contacts()
     else:
-        if pseudo in utilisateurs:
-            sio.emit('reponse_connexion', {'succes': False, 'message': "Session déjà active pour cet utilisateur."}, room=sid)
-            return
-
+        # SI LE MÊME PSEUDO ÉTAIT DÉJÀ CONNECTÉ (ex: reconnexion automatique/changement de SID), ON MET À JOUR LE SID
         if bcrypt.checkpw(code.encode('utf-8'), comptes[pseudo].encode('utf-8')):
+            # Nettoyage de l'ancien SID s'il existait
+            ancien_sid = utilisateurs.get(pseudo)
+            if ancien_sid and ancien_sid in sid_vers_pseudo:
+                del sid_vers_pseudo[ancien_sid]
+
             utilisateurs[pseudo] = sid
             sid_vers_pseudo[sid] = pseudo
             reinitialiser_echecs(ip)
             
+            print(f"[CONNEXION] {pseudo} authentifié avec succès (SID: {sid})")
             sio.emit('reponse_connexion', {'succes': True, 'message': f"Authentifié en tant que '{pseudo}'."}, room=sid)
             diffuser_liste_contacts()
         else:
             enregistrer_echec(ip)
+            print(f"[ECHEC CONNEXION] Identifiants invalides pour {pseudo}")
             sio.emit('reponse_connexion', {'succes': False, 'message': "Identifiants invalides !"}, room=sid)
 
 @sio.event
 def obtenir_liste_contacts(sid, data=None):
-    """Permet au client de redemander la liste des membres à tout moment."""
     sio.emit('liste_contacts', list(comptes.keys()), room=sid)
 
 @sio.event
 def envoyer_demande_ami(sid, data):
-    """Relaye une demande d'ami vers le destinataire ciblé."""
     if not isinstance(data, dict):
         return
     
@@ -157,14 +156,12 @@ def envoyer_demande_ami(sid, data):
 
     destinataire = str(data.get('destinataire', '')).strip()
     
-    # Si le destinataire est connecté, on lui transmet la demande en direct
     if destinataire in utilisateurs:
         target_sid = utilisateurs[destinataire]
         sio.emit('demande_ami_recue', {'demandeur': demandeur}, room=target_sid)
 
 @sio.event
 def reponse_demande_ami(sid, data):
-    """Relaye la réponse (acceptée/refusée) à l'initiateur de la demande."""
     if not isinstance(data, dict):
         return
 
@@ -185,18 +182,23 @@ def reponse_demande_ami(sid, data):
 @sio.event
 def envoyer_message_direct(sid, data):
     if not isinstance(data, dict):
+        print(f"[ERREUR FORMAT] Données non dictionnaire reçues de {sid}")
         return
     
-    # Validation du SID et élimination de l'usurpation d'identité
+    # 1. Vérification de l'expéditeur
     expediteur_reel = sid_vers_pseudo.get(sid)
     if not expediteur_reel:
+        print(f"[REJET MESSAGE] Expéditeur non identifié pour SID={sid}. Session probablement expirée.")
+        sio.emit('erreur_message', {'message': "Votre session n'est pas reconnue. Veuillez vous reconnecter."}, room=sid)
         return
 
-    destinataire = str(data.get('destinataire', ''))
+    destinataire = str(data.get('destinataire', '')).strip()
+    print(f"[TENTATIVE MESSAGE] De '{expediteur_reel}' vers '{destinataire}' (Type: {data.get('type')})")
+
+    # 2. Vérification du destinataire
     if destinataire in utilisateurs:
         target_sid = utilisateurs[destinataire]
         
-        # Reconstruction stricte du payload sur le serveur avant relais
         payload_securise = {
             'expediteur': expediteur_reel,
             'destinataire': destinataire,
@@ -204,7 +206,14 @@ def envoyer_message_direct(sid, data):
             'contenu': str(data.get('contenu', '')),
             'signature': str(data.get('signature', ''))
         }
+        
+        # Envoi au destinataire
         sio.emit('reception_message', payload_securise, room=target_sid)
+        print(f"[SUCCÈS TRANSFERT] Message transmis à {destinataire} (SID: {target_sid})")
+    else:
+        print(f"[ÉCHEC TRANSFERT] Destinataire '{destinataire}' non connecté sur le serveur.")
+        print(f"--> Utilisateurs actuellement actifs : {list(utilisateurs.keys())}")
+        sio.emit('erreur_message', {'message': f"L'utilisateur '{destinataire}' est hors ligne ou introuvable."}, room=sid)
 
 @sio.event
 def disconnect(sid):
@@ -212,6 +221,7 @@ def disconnect(sid):
         pseudo = sid_vers_pseudo.pop(sid)
         if pseudo in utilisateurs:
             del utilisateurs[pseudo]
+        print(f"[DÉCONNEXION] {pseudo} s'est déconnecté (SID: {sid})")
         diffuser_liste_contacts()
 
 if __name__ == '__main__':
