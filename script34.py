@@ -207,7 +207,8 @@ def envoyer_message_direct(sid, data):
             'signature': str(data.get('signature', ''))
         }
         
-        # Envoi direct au SID actif du destinataire
+        # CORRECTIF : le client écoute 'reception_message', pas 'message_direct'.
+        # C'était le bug empêchant tout affichage côté destinataire (handshake ET messages).
         sio.emit('reception_message', payload_securise, room=target_sid)
         print(f"[SUCCÈS TRANSFERT] Message transmis à {destinataire} (SID: {target_sid})")
     else:
