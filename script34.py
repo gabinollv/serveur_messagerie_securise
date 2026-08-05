@@ -208,7 +208,7 @@ def envoyer_message_direct(sid, data):
         }
         
         # Envoi direct au SID actif du destinataire
-        sio.emit('reception_message', payload_securise, room=target_sid)
+        sio.emit('message_direct', payload_securise, room=target_sid)
         print(f"[SUCCÈS TRANSFERT] Message transmis à {destinataire} (SID: {target_sid})")
     else:
         print(f"[ÉCHEC TRANSFERT] Destinataire '{destinataire}' non connecté sur le serveur.")
