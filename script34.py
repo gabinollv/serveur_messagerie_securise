@@ -9,8 +9,11 @@ import bcrypt
 # Optimisation Eventlet pour E/S asynchrones
 eventlet.monkey_patch()
 
-# Limite stricte de la taille des paquets à 32 KB pour contrer les DoS par payload
-MAX_MESSAGE_SIZE = 32 * 1024 
+# Limite de la taille des paquets à 512 KB : assez pour des photos/messages
+# vocaux compressés côté client, tout en restant une limite raisonnable
+# contre les DoS par payload (les gros médias sont downscalés/compressés
+# côté client avant envoi, voir compresser_image_pour_chat côté client).
+MAX_MESSAGE_SIZE = 512 * 1024
 
 sio = socketio.Server(
     cors_allowed_origins='*',
