@@ -152,16 +152,25 @@ def obtenir_liste_contacts(sid, data=None):
 def envoyer_demande_ami(sid, data):
     if not isinstance(data, dict):
         return
-    
+
     demandeur = sid_vers_pseudo.get(sid)
     if not demandeur:
+        print(f"[REJET DEMANDE AMI] Session non reconnue pour SID={sid}")
+        sio.emit('erreur_message', {'message': "Votre session n'est pas reconnue. Veuillez vous reconnecter."}, room=sid)
         return
 
     destinataire = str(data.get('destinataire', '')).strip()
-    
+    print(f"[DEMANDE AMI] '{demandeur}' -> '{destinataire}'")
+
     if destinataire in utilisateurs:
         target_sid = utilisateurs[destinataire]
         sio.emit('demande_ami_recue', {'demandeur': demandeur}, room=target_sid)
+        print(f"[DEMANDE AMI OK] Notifiée à {destinataire} (SID: {target_sid})")
+    else:
+        print(f"[DEMANDE AMI ÉCHEC] '{destinataire}' hors ligne ou introuvable. Actifs : {list(utilisateurs.keys())}")
+        sio.emit('erreur_message', {
+            'message': f"'{destinataire}' est hors ligne ou introuvable : la demande n'a pas pu être envoyée."
+        }, room=sid)
 
 @sio.event
 def reponse_demande_ami(sid, data):
@@ -170,10 +179,12 @@ def reponse_demande_ami(sid, data):
 
     repondeur = sid_vers_pseudo.get(sid)
     if not repondeur:
+        print(f"[REJET RÉPONSE AMI] Session non reconnue pour SID={sid}")
         return
 
     demandeur = str(data.get('demandeur', '')).strip()
     accepte = bool(data.get('accepte', False))
+    print(f"[RÉPONSE AMI] '{repondeur}' -> '{demandeur}' : {'acceptée' if accepte else 'refusée'}")
 
     if demandeur in utilisateurs:
         target_sid = utilisateurs[demandeur]
@@ -181,6 +192,8 @@ def reponse_demande_ami(sid, data):
             'contact': repondeur,
             'accepte': accepte
         }, room=target_sid)
+    else:
+        print(f"[RÉPONSE AMI] '{demandeur}' hors ligne, ne recevra la réponse qu'à sa reconnexion (non stocké).")
 
 @sio.event
 def envoyer_message_direct(sid, data):
