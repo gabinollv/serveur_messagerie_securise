@@ -9,10 +9,7 @@ import bcrypt
 # Optimisation Eventlet pour E/S asynchrones
 eventlet.monkey_patch()
 
-# Limite de la taille des paquets à 512 KB : assez pour des photos/messages
-# vocaux compressés côté client, tout en restant une limite raisonnable
-# contre les DoS par payload (les gros médias sont downscalés/compressés
-# côté client avant envoi, voir compresser_image_pour_chat côté client).
+# Limite de la taille des paquets à 512 KB
 MAX_MESSAGE_SIZE = 512 * 1024
 
 sio = socketio.Server(
@@ -23,14 +20,14 @@ sio = socketio.Server(
 app = socketio.WSGIApp(sio)
 
 FICHIER_COMPTES = "comptes.json"
+FICHIER_PROFILS = "profils.json"  # Fichier pour stocker les emails, tels et liens
 tentatives_echouees = {}
 
-# Mappage strict pour prévenir l'usurpation d'identité (Spoofing)
+# Mappage strict pour prévenir l'usurpation d'identité
 utilisateurs = {}     # { pseudo: sid }
 sid_vers_pseudo = {}  # { sid: pseudo }
 
 def nettoyer_rate_limit():
-    """Purge dynamique des données de rate-limiting pour éviter la fuite mémoire (DoS)."""
     maintenant = time.time()
     cles_a_supprimer = [
         ip for ip, info in tentatives_echouees.items()
@@ -60,31 +57,29 @@ def reinitialiser_echecs(ip):
     if ip in tentatives_echouees:
         del tentatives_echouees[ip]
 
-def charger_comptes():
-    if os.path.exists(FICHIER_COMPTES):
+def charger_json(fichier):
+    if os.path.exists(fichier):
         try:
-            with open(FICHIER_COMPTES, "r", encoding="utf-8") as f:
+            with open(fichier, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
-            print(f"[ERREUR CRITIQUE] Impossible de lire {FICHIER_COMPTES}: {e}")
-            return {}
+            print(f"[ERREUR] Impossible de lire {fichier}: {e}")
     return {}
 
-def sauvegarder_comptes_atomique():
-    """Écriture atomique sécurisée sur le disque dur pour prévenir la corruption des comptes."""
+def sauvegarder_json_atomique(donnees, fichier):
     try:
-        dir_name = os.path.dirname(FICHIER_COMPTES) or '.'
+        dir_name = os.path.dirname(fichier) or '.'
         with tempfile.NamedTemporaryFile('w', delete=False, dir=dir_name, encoding='utf-8') as tf:
-            json.dump(comptes, tf, indent=4)
+            json.dump(donnees, tf, indent=4)
             temp_name = tf.name
-        os.replace(temp_name, FICHIER_COMPTES)
+        os.replace(temp_name, fichier)
     except Exception as e:
-        print(f"[ERREUR CRITIQUE] Sauvegarde atomique a échoué : {e}")
+        print(f"[ERREUR] Sauvegarde {fichier} a échoué : {e}")
 
-comptes = charger_comptes()
+comptes = charger_json(FICHIER_COMPTES)
+profils = charger_json(FICHIER_PROFILS)
 
 def diffuser_liste_contacts():
-    """Diffuse la liste de tous les inscrits (ou connectés) à tout le monde."""
     liste_membres = list(comptes.keys())
     sio.emit('liste_contacts', liste_membres)
 
@@ -115,7 +110,11 @@ def enregistrer_utilisateur(sid, data):
     if pseudo not in comptes:
         sel = bcrypt.gensalt(rounds=12)
         comptes[pseudo] = bcrypt.hashpw(code.encode('utf-8'), sel).decode('utf-8')
-        sauvegarder_comptes_atomique()
+        sauvegarder_json_atomique(comptes, FICHIER_COMPTES)
+        
+        # Initialisation d'un profil vide
+        profils[pseudo] = {"email": "Non renseigné", "phone": "Non renseigné", "links": []}
+        sauvegarder_json_atomique(profils, FICHIER_PROFILS)
         
         utilisateurs[pseudo] = sid
         sid_vers_pseudo[sid] = pseudo
@@ -125,9 +124,7 @@ def enregistrer_utilisateur(sid, data):
         sio.emit('reponse_connexion', {'succes': True, 'message': f"Compte sécurisé créé pour '{pseudo}'."}, room=sid)
         diffuser_liste_contacts()
     else:
-        # Authentification d'un compte existant / Reconnexion
         if bcrypt.checkpw(code.encode('utf-8'), comptes[pseudo].encode('utf-8')):
-            # Nettoyage de la liaison de l'ancien SID si l'utilisateur change de socket
             ancien_sid = utilisateurs.get(pseudo)
             if ancien_sid and ancien_sid in sid_vers_pseudo:
                 del sid_vers_pseudo[ancien_sid]
@@ -150,71 +147,45 @@ def obtenir_liste_contacts(sid, data=None):
 
 @sio.event
 def envoyer_demande_ami(sid, data):
-    if not isinstance(data, dict):
-        return
-
+    if not isinstance(data, dict): return
     demandeur = sid_vers_pseudo.get(sid)
     if not demandeur:
-        print(f"[REJET DEMANDE AMI] Session non reconnue pour SID={sid}")
         sio.emit('erreur_message', {'message': "Votre session n'est pas reconnue. Veuillez vous reconnecter."}, room=sid)
         return
 
     destinataire = str(data.get('destinataire', '')).strip()
-    print(f"[DEMANDE AMI] '{demandeur}' -> '{destinataire}'")
-
     if destinataire in utilisateurs:
         target_sid = utilisateurs[destinataire]
         sio.emit('demande_ami_recue', {'demandeur': demandeur}, room=target_sid)
-        print(f"[DEMANDE AMI OK] Notifiée à {destinataire} (SID: {target_sid})")
     else:
-        print(f"[DEMANDE AMI ÉCHEC] '{destinataire}' hors ligne ou introuvable. Actifs : {list(utilisateurs.keys())}")
-        sio.emit('erreur_message', {
-            'message': f"'{destinataire}' est hors ligne ou introuvable : la demande n'a pas pu être envoyée."
-        }, room=sid)
+        sio.emit('erreur_message', {'message': f"'{destinataire}' est hors ligne ou introuvable."}, room=sid)
 
 @sio.event
 def reponse_demande_ami(sid, data):
-    if not isinstance(data, dict):
-        return
-
+    if not isinstance(data, dict): return
     repondeur = sid_vers_pseudo.get(sid)
-    if not repondeur:
-        print(f"[REJET RÉPONSE AMI] Session non reconnue pour SID={sid}")
-        return
+    if not repondeur: return
 
     demandeur = str(data.get('demandeur', '')).strip()
     accepte = bool(data.get('accepte', False))
-    print(f"[RÉPONSE AMI] '{repondeur}' -> '{demandeur}' : {'acceptée' if accepte else 'refusée'}")
 
     if demandeur in utilisateurs:
         target_sid = utilisateurs[demandeur]
-        sio.emit('reponse_demande_ami_recue', {
-            'contact': repondeur,
-            'accepte': accepte
-        }, room=target_sid)
-    else:
-        print(f"[RÉPONSE AMI] '{demandeur}' hors ligne, ne recevra la réponse qu'à sa reconnexion (non stocké).")
+        sio.emit('reponse_demande_ami_recue', {'contact': repondeur, 'accepte': accepte}, room=target_sid)
 
 @sio.event
 def envoyer_message_direct(sid, data):
-    if not isinstance(data, dict):
-        print(f"[ERREUR FORMAT] Données non dictionnaire reçues de {sid}")
-        return
+    if not isinstance(data, dict): return
     
-    # 1. Vérification de l'expéditeur
     expediteur_reel = sid_vers_pseudo.get(sid)
     if not expediteur_reel:
-        print(f"[REJET MESSAGE] Expéditeur non identifié pour SID={sid}. Session probablement expirée.")
-        sio.emit('erreur_message', {'message': "Votre session n'est pas reconnue. Veuillez vous reconnecter."}, room=sid)
+        sio.emit('erreur_message', {'message': "Votre session n'est pas reconnue."}, room=sid)
         return
 
     destinataire = str(data.get('destinataire', '')).strip()
-    print(f"[TENTATIVE MESSAGE] De '{expediteur_reel}' vers '{destinataire}' (Type: {data.get('type')})")
 
-    # 2. Vérification du destinataire
     if destinataire in utilisateurs:
         target_sid = utilisateurs[destinataire]
-        
         payload_securise = {
             'expediteur': expediteur_reel,
             'destinataire': destinataire,
@@ -222,31 +193,54 @@ def envoyer_message_direct(sid, data):
             'contenu': str(data.get('contenu', '')),
             'signature': str(data.get('signature', ''))
         }
-        
-        # CORRECTIF : le client écoute 'reception_message', pas 'message_direct'.
-        # C'était le bug empêchant tout affichage côté destinataire (handshake ET messages).
         sio.emit('reception_message', payload_securise, room=target_sid)
-        print(f"[SUCCÈS TRANSFERT] Message transmis à {destinataire} (SID: {target_sid})")
     else:
-        print(f"[ÉCHEC TRANSFERT] Destinataire '{destinataire}' non connecté sur le serveur.")
-        print(f"--> Utilisateurs actuellement actifs : {list(utilisateurs.keys())}")
         sio.emit('erreur_message', {'message': f"L'utilisateur '{destinataire}' est hors ligne ou introuvable."}, room=sid)
+
+# --- NOUVEAU : Gestion des profils ---
+@sio.event
+def maj_infos_contact(sid, data):
+    """Reçu quand un utilisateur modifie son propre profil."""
+    pseudo = sid_vers_pseudo.get(sid)
+    if not pseudo or not isinstance(data, dict): return
+    
+    # On met à jour le dictionnaire et on sauvegarde
+    if pseudo not in profils:
+        profils[pseudo] = {}
+        
+    profils[pseudo]["email"] = data.get("email", "Non renseigné")
+    profils[pseudo]["phone"] = data.get("phone", "Non renseigné")
+    profils[pseudo]["links"] = data.get("links", [])
+    
+    sauvegarder_json_atomique(profils, FICHIER_PROFILS)
+    print(f"[PROFIL] Mise à jour des informations pour {pseudo}")
+
+@sio.event
+def demander_infos_contact(sid, data):
+    """Reçu quand un utilisateur veut voir le profil d'un contact."""
+    if not isinstance(data, dict): return
+    
+    cible = data.get("pseudo")
+    infos_cible = profils.get(cible, {})
+    
+    reponse = {
+        "pseudo": cible,
+        "email": infos_cible.get("email", "Non renseigné"),
+        "phone": infos_cible.get("phone", "Non renseigné"),
+        "links": infos_cible.get("links", [])
+    }
+    sio.emit("reception_infos_contact", reponse, to=sid)
 
 @sio.event
 def disconnect(sid):
     if sid in sid_vers_pseudo:
         pseudo = sid_vers_pseudo.pop(sid)
-        
-        # CORRECTIF : On ne supprime l'utilisateur de 'utilisateurs' QUE SI
-        # le SID déconnecté est bien le SID actif (évite d'effacer une reconnexion récente)
         if utilisateurs.get(pseudo) == sid:
             del utilisateurs[pseudo]
             print(f"[DÉCONNEXION] {pseudo} s'est totalement déconnecté (SID: {sid})")
             diffuser_liste_contacts()
-        else:
-            print(f"[RECONNEXION DUPLIQUÉE] Ancien SID nettoyé ({sid}) pour {pseudo}, la nouvelle session active est préservée.")
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
-    print(f"[SERVEUR MAXIMUM SECURITY HARDENED] Écoute active sur le port {port}...")
+    print(f"[SERVEUR] Écoute active sur le port {port}...")
     eventlet.wsgi.server(eventlet.listen(('0.0.0.0', port)), app)
