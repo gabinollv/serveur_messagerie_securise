@@ -175,27 +175,50 @@ def reponse_demande_ami(sid, data):
 
 @sio.event
 def envoyer_message_direct(sid, data):
-    if not isinstance(data, dict): return
-    
-    expediteur_reel = sid_vers_pseudo.get(sid)
-    if not expediteur_reel:
-        sio.emit('erreur_message', {'message': "Votre session n'est pas reconnue."}, room=sid)
+    if not isinstance(data, dict):
         return
 
-    destinataire = str(data.get('destinataire', '')).strip()
+    expediteur_reel = sid_vers_pseudo.get(sid)
+    if not expediteur_reel:
+        print(f"[SERVEUR REJET] Session non reconnue pour le SID: {sid}")
+        sio.emit(
+            "erreur_message",
+            {"message": "Votre session n'est pas reconnue."},
+            room=sid,
+        )
+        return
+
+    destinataire = str(data.get("destinataire", "")).strip()
+    type_msg = str(data.get("type", ""))
+
+    print(
+        f"[SERVEUR ROUTAGE] Message de '{expediteur_reel}' vers '{destinataire}' (Type: {type_msg})"
+    )
 
     if destinataire in utilisateurs:
         target_sid = utilisateurs[destinataire]
         payload_securise = {
-            'expediteur': expediteur_reel,
-            'destinataire': destinataire,
-            'type': str(data.get('type', '')),
-            'contenu': str(data.get('contenu', '')),
-            'signature': str(data.get('signature', ''))
+            "expediteur": expediteur_reel,
+            "destinataire": destinataire,
+            "type": type_msg,
+            "contenu": str(data.get("contenu", "")),
+            "signature": str(data.get("signature", "")),
         }
-        sio.emit('reception_message', payload_securise, room=target_sid)
+        sio.emit("reception_message", payload_securise, room=target_sid)
+        print(
+            f"[SERVEUR SUCCÈS] Transmis à {destinataire} (SID: {target_sid})"
+        )
     else:
-        sio.emit('erreur_message', {'message': f"L'utilisateur '{destinataire}' est hors ligne ou introuvable."}, room=sid)
+        print(
+            f"[SERVEUR ERREUR] Destinataire '{destinataire}' introuvable ou hors ligne"
+        )
+        sio.emit(
+            "erreur_message",
+            {
+                "message": f"L'utilisateur '{destinataire}' est hors ligne ou introuvable."
+            },
+            room=sid,
+        )
 
 # --- NOUVEAU : Gestion des profils ---
 @sio.event
