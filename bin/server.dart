@@ -34,7 +34,7 @@ String _randomString(int bytes) {
 }
 
 String _hashPassword(String password, String salt) {
-  var digest = utf8.encode('$salt$password');
+  List<int> digest = utf8.encode('$salt$password');
   for (var i = 0; i < 10000; i++) {
     digest = sha256.convert([...digest, ...utf8.encode(salt)]).bytes;
   }
