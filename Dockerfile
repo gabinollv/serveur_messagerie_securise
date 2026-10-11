@@ -1,6 +1,6 @@
 # --- Étape 1 : compilation ---
 FROM dart:stable AS build
-WORKDIR /app
+WORKDIR /app 
 
 COPY pubspec.yaml ./
 RUN dart pub get
