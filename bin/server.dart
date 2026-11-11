@@ -1,8 +1,10 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:math';
 
-import 'package:crypto/crypto.dart';
+import 'package:crypto/crypto.dart' as crypto;
+import 'package:cryptography/cryptography.dart' as cg;
 import 'package:postgres/postgres.dart';
 import 'package:shelf/shelf.dart';
 import 'package:shelf/shelf_io.dart' as io;
@@ -48,6 +50,12 @@ Future<void> _initDb() async {
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
   ''');
+  // Migration : les comptes existants gardent l'ancien algorithme jusqu'à
+  // leur prochaine connexion, où ils sont automatiquement migrés vers Argon2id.
+  await _db.execute(
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS hash_algo TEXT NOT NULL "
+    "DEFAULT '$_legacyAlgo'",
+  );
   await _db.execute('''
     CREATE TABLE IF NOT EXISTS sessions (
       token_hash TEXT PRIMARY KEY,
@@ -55,25 +63,73 @@ Future<void> _initDb() async {
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
   ''');
+  await _db.execute(
+    'CREATE INDEX IF NOT EXISTS sessions_user_id_idx ON sessions(user_id)',
+  );
 }
 
 // ---------------------------------------------------------------------------
 // Sécurité : on ne stocke JAMAIS le mot de passe ni le token en clair
 // ---------------------------------------------------------------------------
+const _legacyAlgo = 'sha256-legacy';
+// Argon2id, paramètres OWASP : 19 Mio de mémoire, 2 itérations, 1 thread.
+// Si tu changes les paramètres, crée un nouveau nom (ex. 'argon2id-v2') :
+// les comptes seront migrés automatiquement à leur prochaine connexion.
+const _argonAlgo = 'argon2id-v1';
+
 String _randomString(int bytes) {
   final rnd = Random.secure();
   return base64Url.encode(List<int>.generate(bytes, (_) => rnd.nextInt(256)));
 }
 
-String _hashPassword(String password, String salt) {
+// Ancien hachage, conservé uniquement pour vérifier les comptes non migrés.
+String _legacyHash(String password, String salt) {
   List<int> digest = utf8.encode('$salt$password');
   for (var i = 0; i < 10000; i++) {
-    digest = sha256.convert([...digest, ...utf8.encode(salt)]).bytes;
+    digest =
+        crypto.sha256.convert([...digest, ...utf8.encode(salt)]).bytes;
   }
   return base64Url.encode(digest);
 }
 
-String _hashToken(String token) => sha256.convert(utf8.encode(token)).toString();
+Future<String> _computeHash(String password, String salt, String algo) async {
+  if (algo == _legacyAlgo) return _legacyHash(password, salt);
+  final argon2 = cg.Argon2id(
+    memory: 19456,
+    parallelism: 1,
+    iterations: 2,
+    hashLength: 32,
+  );
+  final key = await argon2.deriveKeyFromPassword(
+    password: password,
+    nonce: base64Url.decode(salt),
+  );
+  return base64Url.encode(await key.extractBytes());
+}
+
+// Le calcul tourne dans un isolate séparé pour ne pas bloquer le serveur
+// pendant qu'il hache un mot de passe.
+Future<String> _hashPassword(String password, String salt, String algo) =>
+    Isolate.run(() => _computeHash(password, salt, algo));
+
+// Comparaison en temps constant (évite de révéler le hash par le temps de réponse)
+bool _safeEquals(String a, String b) {
+  final x = utf8.encode(a);
+  final y = utf8.encode(b);
+  var diff = x.length ^ y.length;
+  for (var i = 0; i < min(x.length, y.length); i++) {
+    diff |= x[i] ^ y[i];
+  }
+  return diff == 0;
+}
+
+String _hashToken(String token) =>
+    crypto.sha256.convert(utf8.encode(token)).toString();
+
+String _bearer(Request req) {
+  final header = req.headers['authorization'] ?? '';
+  return header.startsWith('Bearer ') ? header.substring(7).trim() : '';
+}
 
 Response _json(int status, Map<String, dynamic> body) => Response(
       status,
@@ -120,16 +176,19 @@ Future<Response> _register(Request req) async {
   }
 
   final salt = _randomString(16);
+  final hash = await _hashPassword(password, salt, _argonAlgo);
   try {
     await _db.execute(
       Sql.named('INSERT INTO users (pseudo, identifiant, identifiant_key, '
-          'salt, password_hash) VALUES (@pseudo, @identifiant, @key, @salt, @hash)'),
+          'salt, password_hash, hash_algo) '
+          'VALUES (@pseudo, @identifiant, @key, @salt, @hash, @algo)'),
       parameters: {
         'pseudo': pseudo,
         'identifiant': identifiant,
         'key': identifiant.toLowerCase(),
         'salt': salt,
-        'hash': _hashPassword(password, salt),
+        'hash': hash,
+        'algo': _argonAlgo,
       },
     );
   } on ServerException catch (e) {
@@ -141,6 +200,10 @@ Future<Response> _register(Request req) async {
 
   return _json(201, {'message': 'Compte créé avec succès'});
 }
+
+// Sel factice : sert à hacher quand l'identifiant n'existe pas, pour que la
+// réponse prenne le même temps (on ne révèle pas quels identifiants existent).
+final _dummySalt = _randomString(16);
 
 Future<Response> _login(Request req) async {
   final body = await _readBody(req);
@@ -155,13 +218,34 @@ Future<Response> _login(Request req) async {
     Sql.named('SELECT * FROM users WHERE identifiant_key = @key'),
     parameters: {'key': identifiant.toLowerCase()},
   );
-  if (res.isEmpty) return _json(401, {'error': wrong});
+  if (res.isEmpty) {
+    await _hashPassword(password, _dummySalt, _argonAlgo);
+    return _json(401, {'error': wrong});
+  }
 
   final user = res.first.toColumnMap();
-  if (user['pseudo'] != pseudo) return _json(401, {'error': wrong});
-  if (_hashPassword(password, user['salt'] as String) !=
-      user['password_hash']) {
+  final algo = user['hash_algo'] as String;
+  final computed =
+      await _hashPassword(password, user['salt'] as String, algo);
+  final passwordOk = _safeEquals(computed, user['password_hash'] as String);
+  if (!passwordOk || user['pseudo'] != pseudo) {
     return _json(401, {'error': wrong});
+  }
+
+  // Migration transparente : un ancien compte passe à Argon2id maintenant
+  // que l'on connaît son mot de passe en clair.
+  if (algo != _argonAlgo) {
+    final newSalt = _randomString(16);
+    await _db.execute(
+      Sql.named('UPDATE users SET salt = @salt, password_hash = @hash, '
+          'hash_algo = @algo WHERE id = @id'),
+      parameters: {
+        'salt': newSalt,
+        'hash': await _hashPassword(password, newSalt, _argonAlgo),
+        'algo': _argonAlgo,
+        'id': user['id'],
+      },
+    );
   }
 
   final token = _randomString(32);
@@ -172,24 +256,59 @@ Future<Response> _login(Request req) async {
 
   return _json(200, {
     'token': token,
-    'user': {'pseudo': user['pseudo'], 'identifiant': user['identifiant']},
+    'user': {
+      'id': user['id'],
+      'pseudo': user['pseudo'],
+      'identifiant': user['identifiant'],
+    },
   });
 }
 
+// Les sessions n'expirent pas : un token reste valide jusqu'à /logout
+// ou /logout_all.
 Future<Response> _me(Request req) async {
-  final token = (req.headers['authorization'] ?? '').replaceFirst('Bearer ', '');
+  final token = _bearer(req);
   if (token.isEmpty) return _json(401, {'error': 'Non connecté'});
 
   final res = await _db.execute(
-    Sql.named('SELECT u.pseudo, u.identifiant FROM sessions s '
-        'JOIN users u ON u.id = s.user_id '
-        "WHERE s.token_hash = @t AND s.created_at > now() - interval '30 days'"),
+    Sql.named('SELECT u.id, u.pseudo, u.identifiant FROM sessions s '
+        'JOIN users u ON u.id = s.user_id WHERE s.token_hash = @t'),
     parameters: {'t': _hashToken(token)},
   );
-  if (res.isEmpty) return _json(401, {'error': 'Session expirée'});
+  if (res.isEmpty) return _json(401, {'error': 'Session invalide'});
 
   final user = res.first.toColumnMap();
-  return _json(200, {'pseudo': user['pseudo'], 'identifiant': user['identifiant']});
+  return _json(200, {
+    'id': user['id'],
+    'pseudo': user['pseudo'],
+    'identifiant': user['identifiant'],
+  });
+}
+
+// Déconnecte cet appareil : supprime la session du token envoyé.
+Future<Response> _logout(Request req) async {
+  final token = _bearer(req);
+  if (token.isEmpty) return _json(401, {'error': 'Non connecté'});
+
+  await _db.execute(
+    Sql.named('DELETE FROM sessions WHERE token_hash = @t'),
+    parameters: {'t': _hashToken(token)},
+  );
+  return _json(200, {'message': 'Déconnecté'});
+}
+
+// Déconnecte tous les appareils du compte (utile si un token est volé).
+Future<Response> _logoutAll(Request req) async {
+  final token = _bearer(req);
+  if (token.isEmpty) return _json(401, {'error': 'Non connecté'});
+
+  final res = await _db.execute(
+    Sql.named('DELETE FROM sessions WHERE user_id = '
+        '(SELECT user_id FROM sessions WHERE token_hash = @t)'),
+    parameters: {'t': _hashToken(token)},
+  );
+  if (res.affectedRows == 0) return _json(401, {'error': 'Session invalide'});
+  return _json(200, {'message': 'Tous les appareils sont déconnectés'});
 }
 
 void main() async {
@@ -200,7 +319,9 @@ void main() async {
     ..get('/', (Request r) => _json(200, {'status': 'ok'}))
     ..post('/register', _register)
     ..post('/login', _login)
-    ..get('/me', _me);
+    ..get('/me', _me)
+    ..post('/logout', _logout)
+    ..post('/logout_all', _logoutAll);
 
   final handler = const Pipeline()
       .addMiddleware(logRequests())
